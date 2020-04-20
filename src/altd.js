@@ -42,7 +42,13 @@ export default class AccessLogTailDispatcher {
             return [];
         }
         let commands = path.split(/\//).map(function(element, index, array) {
-            return decodeURIComponent(element);
+            let ret = "";
+            try{
+              ret = decodeURIComponent(element);
+            }catch(e){
+              console.error(e);
+            }
+            return ret;
         });
         commands.shift();
         return commands;
