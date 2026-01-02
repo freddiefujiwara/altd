@@ -4,19 +4,22 @@
   "description": "Access log tail dispatcher",
   "type": "module",
   "bin": {
-    "altd": "./index.js"
+    "altd": "./dist/index.js"
   },
-  "main": "./src/altd.js",
+  "main": "./dist/altd.js",
   "exports": {
-    ".": "./src/altd.js"
+    ".": "./dist/altd.js"
   },
   "files": [
+    "dist",
     "src",
     "index.js",
+    "scripts",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "build": "node scripts/build.js",
     "test": "vitest run --coverage",
     "test:watch": "vitest"
   },
