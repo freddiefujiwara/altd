@@ -1,24 +1,29 @@
 #!/usr/bin/env node
-let program = require('commander');
-let pkg = require('./package');
-let fileValue = undefined;
-let whitelist = undefined;
+import { Command } from 'commander';
+import pkg from './package.json' assert { type: 'json' };
+import AccessLogTailDispatcher from './src/altd.js';
+
+const program = new Command();
 
 program
-    .version(pkg.version)
-    .description(pkg.description)
-    .arguments('<file>')
-    .option('-w, --whitelist <commands>', 'Add commands to whitelist', (commands)=>commands.split(','))
-    .action(function(file){
-        fileValue = file;
-    });
-program.parse(process.argv);
-if(typeof fileValue === 'undefined' || 
-    typeof program.whitelist === 'undefined'){
-    console.log('altd <file> -w <commands...>');
-    process.exit(1);
-}
-let AccessLogTailDispatcher = require('./lib/altd');
+  .name('altd')
+  .version(pkg.version)
+  .description(pkg.description)
+  .argument('<file>')
+  .option(
+    '-w, --whitelist <commands>',
+    'Add commands to whitelist',
+    (commands) => commands.split(',')
+  )
+  .parse(process.argv);
 
-let altd = new AccessLogTailDispatcher(fileValue,program.whitelist);
+const fileValue = program.args[0];
+const { whitelist } = program.opts();
+
+if (!fileValue || !whitelist) {
+  console.log('altd <file> -w <commands...>');
+  process.exit(1);
+}
+
+const altd = new AccessLogTailDispatcher(fileValue, whitelist);
 altd.run();
