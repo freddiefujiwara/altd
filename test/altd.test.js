@@ -96,7 +96,7 @@ describe('AccessLogTailDispatcher', () => {
 
     expect(altd.commandWithArgs('/test/%E0%A4%A')).toEqual([
       'test',
-      '%E0%A4%A',
+      '',
     ]);
     expect(errorSpy).toHaveBeenCalled();
   });
