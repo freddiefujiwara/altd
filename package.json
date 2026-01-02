@@ -1,6 +1,6 @@
 {
   "name": "altd",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Access log tail dispatcher",
   "type": "module",
   "bin": {
