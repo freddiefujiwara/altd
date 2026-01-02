@@ -80,6 +80,37 @@ describe('AccessLogTailDispatcher', () => {
           + 'https://example.com/hello?x=1#frag HTTP/1.1" 200 0 "-" "UA"'
       )
     ).toBe('/hello');
+    expect(
+      altd.extractPath(
+        '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET '
+          + 'http://example.com/hi HTTP/1.1" 200 0 "-" "UA"'
+      )
+    ).toBe('/hi');
+    expect(
+      altd.extractPath(
+        '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET http://% HTTP/1.1" 200 0 "-" "UA"'
+      )
+    ).toBe('');
+  });
+
+  it('falls back to an empty pathname when URL has none', () => {
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
+    const originalURL = global.URL;
+
+    global.URL = class FakeURL {
+      constructor() {
+        return { pathname: '' };
+      }
+    };
+
+    expect(
+      altd.extractPath(
+        '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET http://example.com HTTP/1.1" 200 0 "-" "UA"'
+      )
+    ).toBe('');
+
+    global.URL = originalURL;
   });
 
   it('parses command and args safely', () => {
@@ -112,6 +143,16 @@ describe('AccessLogTailDispatcher', () => {
     expect(altd.resolveExecution(['missing'])).toBeNull();
     expect(altd.resolveExecution(['bad', 'x'])).toBeNull();
     expect(altd.resolveExecution([])).toBeNull();
+  });
+
+  it('uses default args builder when one is not provided', () => {
+    const registry = { echo: { execPath: '/bin/echo' } };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
+
+    expect(altd.resolveExecution(['echo', 'a', 'b'])).toEqual({
+      execPath: '/bin/echo',
+      args: ['a', 'b'],
+    });
   });
 
   it('spawns commands with the configured spawn implementation', () => {
@@ -201,6 +242,14 @@ describe('AccessLogTailDispatcher', () => {
   it('stops safely when tail has no unwatch', () => {
     const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
     const tail = { on: vi.fn(), watch: vi.fn() };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry, { tail });
+
+    expect(() => altd.stop()).not.toThrow();
+  });
+
+  it('swallows errors when unwatch throws', () => {
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
+    const tail = { on: vi.fn(), watch: vi.fn(), unwatch: vi.fn(() => { throw new Error('no'); }) };
     const altd = new AccessLogTailDispatcher('/path/to/dir', registry, { tail });
 
     expect(() => altd.stop()).not.toThrow();
