@@ -104,6 +104,12 @@ export default class AccessLogTailDispatcher {
      * @param {Array} whitelist ['command1','command2'...]
      */
     run(file, whitelist) {
+        if ( typeof file !== 'undefined') {
+            this.file = file;
+        }
+        if ( typeof whitelist !== 'undefined') {
+            this.whitelist = whitelist;
+        }
         if ( typeof this.spawn === 'undefined') {
             this.spawn = spawn;
         }

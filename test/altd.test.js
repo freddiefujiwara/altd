@@ -197,4 +197,33 @@ describe('AccessLogTailDispatcher', () => {
     expect(logSpy).toHaveBeenCalledWith('watching stopped');
     expect(tailInstance.watch).toHaveBeenCalled();
   });
+
+  it('reuses an existing tail and accepts updated run arguments', () => {
+    const altd = new AccessLogTailDispatcher('/path/to/dir', ['command1']);
+    const dispatchSpy = vi.spyOn(altd, 'dispatch').mockImplementation(() => {});
+    const existingTail = {
+      on: vi.fn((event, handler) => {
+        if (event === 'line') {
+          existingTail.lineHandler = handler;
+        }
+      }),
+      watch: vi.fn(),
+    };
+
+    altd.spawn = vi.fn();
+    altd.tail = existingTail;
+
+    altd.run('/next/path', ['command2']);
+
+    expect(altd.file).toBe('/next/path');
+    expect(altd.whitelist).toEqual(['command2']);
+    expect(existingTail.watch).toHaveBeenCalled();
+
+    existingTail.lineHandler(
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] \"GET /command2/arg1 HTTP/1.1\" 200 0 \"-\" \"UA\"'
+    );
+
+    expect(dispatchSpy).toHaveBeenCalledWith(['command2', 'arg1']);
+    expect(tailInstances).toHaveLength(0);
+  });
 });
