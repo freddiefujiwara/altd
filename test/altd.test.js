@@ -68,6 +68,7 @@ describe('AccessLogTailDispatcher', () => {
 
     expect(altd.path({})).toBe('');
     expect(altd.path('')).toBe('');
+    expect(altd.path('POST /not-a-get HTTP/1.1')).toBe('');
     expect(
       altd.path(
         '133.237.7.76 - - [16/Dec/2017:12:47:44 +0900] "GET '
@@ -84,6 +85,7 @@ describe('AccessLogTailDispatcher', () => {
     ]);
 
     expect(altd.commandWithArgs()).toEqual([]);
+    expect(altd.commandWithArgs('')).toEqual([]);
     expect(altd.commandWithArgs('/google-home-notifier/Hello%20World')).toEqual([
       'google-home-notifier',
       'Hello World',
@@ -112,6 +114,7 @@ describe('AccessLogTailDispatcher', () => {
       []
     );
     expect(altd.filterByWhitelist(undefined, ['command1', 'command2'])).toEqual([]);
+    expect(altd.filterByWhitelist([], ['command1'])).toEqual([]);
     expect(
       altd.filterByWhitelist(['command1', 'arg1', 'arg2'], [
         'command3',
@@ -187,6 +190,12 @@ describe('AccessLogTailDispatcher', () => {
     expect(tailInstances).toHaveLength(1);
 
     const tailInstance = tailInstances[0];
+    expect(tailInstance.file).toBe('/path/to/dir');
+    expect(tailInstance.options).toEqual({
+      alwaysStat: true,
+      ignoreInitial: true,
+      persistent: true,
+    });
     tailInstance.emit(
       'line',
       '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /command1/arg1 HTTP/1.1" 200 0 "-" "UA"'
