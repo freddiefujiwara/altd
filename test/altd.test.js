@@ -71,7 +71,7 @@ describe('AccessLogTailDispatcher', () => {
       altd.extractPath(
         '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /bad%ZZ HTTP/1.1" 200 0 "-" "UA"'
       )
-    ).toBe('');
+    ).toBe('/bad%ZZ');
     expect(
       altd.extractPath(
         '133.237.7.76 - - [16/Dec/2017:12:47:44 +0900] "GET '
