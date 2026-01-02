@@ -8,6 +8,7 @@ class TailMock {
     this.options = options;
     this.handlers = {};
     this.watch = vi.fn();
+    this.unwatch = vi.fn();
     tailInstances.push(this);
   }
 
@@ -28,7 +29,7 @@ vi.mock('nodejs-tail', () => ({
   default: TailMock,
 }));
 
-vi.mock('child_process', () => ({
+vi.mock('node:child_process', () => ({
   spawn: spawnMock,
 }));
 
@@ -46,147 +47,167 @@ afterEach(() => {
 });
 
 describe('AccessLogTailDispatcher', () => {
-  it('initializes with expected properties', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', [
-      'command1',
-      'command2',
-    ]);
+  it('initializes with expected defaults', () => {
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
 
-    expect(altd).toMatchObject({
-      file: '/path/to/dir',
-      whitelist: ['command1', 'command2'],
-      spawn: undefined,
-      tail: undefined,
-    });
+    expect(altd.file).toBe('/path/to/dir');
+    expect(altd.registry).toBe(registry);
+    expect(altd.windowMs).toBe(1000);
+    expect(altd.maxPerWindow).toBe(5);
+    expect(altd.timeoutMs).toBe(10_000);
+    expect(altd.maxStdoutBytes).toBe(64 * 1024);
   });
 
-  it('extracts a path from a log line', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', [
-      'command1',
-      'command2',
-    ]);
+  it('extracts a pathname from log lines', () => {
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
 
-    expect(altd.path({})).toBe('');
-    expect(altd.path('')).toBe('');
-    expect(altd.path('POST /not-a-get HTTP/1.1')).toBe('');
+    expect(altd.extractPath({})).toBe('');
+    expect(altd.extractPath('')).toBe('');
+    expect(altd.extractPath('x'.repeat(10_001))).toBe('');
+    expect(altd.extractPath('POST /not-a-get HTTP/1.1')).toBe('/not-a-get');
     expect(
-      altd.path(
+      altd.extractPath(
+        '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /bad%ZZ HTTP/1.1" 200 0 "-" "UA"'
+      )
+    ).toBe('/bad%ZZ');
+    expect(
+      altd.extractPath(
         '133.237.7.76 - - [16/Dec/2017:12:47:44 +0900] "GET '
           + '/google-home-notifier/Hello%20World '
           + 'HTTP/1.1" 404 580 "-" "Mozilla/5.0"'
       )
     ).toBe('/google-home-notifier/Hello%20World');
+    expect(
+      altd.extractPath(
+        '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET '
+          + 'https://example.com/hello?x=1#frag HTTP/1.1" 200 0 "-" "UA"'
+      )
+    ).toBe('/hello');
   });
 
-  it('parses commands and args from a path', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', [
-      'command1',
-      'command2',
-    ]);
+  it('parses command and args safely', () => {
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
 
-    expect(altd.commandWithArgs()).toEqual([]);
-    expect(altd.commandWithArgs('')).toEqual([]);
-    expect(altd.commandWithArgs('/google-home-notifier/Hello%20World')).toEqual([
+    expect(altd.parseCommand()).toEqual([]);
+    expect(altd.parseCommand('')).toEqual([]);
+    expect(altd.parseCommand('no-slash')).toEqual([]);
+    expect(altd.parseCommand('/')).toEqual([]);
+    expect(altd.parseCommand('/' + 'a'.repeat(2049))).toEqual([]);
+    expect(altd.parseCommand('/tool/' + 'b'.repeat(257))).toEqual([]);
+    expect(altd.parseCommand('/google-home-notifier/Hello%20World')).toEqual([
       'google-home-notifier',
       'Hello World',
     ]);
+    expect(altd.parseCommand('/test/%E0%A4%A')).toEqual([]);
   });
 
-  it('handles malformed URI components while parsing command args', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', ['command1']);
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('rate limits execution', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2024-01-01T00:00:00Z'));
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry, {
+      windowMs: 1000,
+      maxPerWindow: 2,
+    });
 
-    expect(altd.commandWithArgs('/test/%E0%A4%A')).toEqual([
-      'test',
-      '',
-    ]);
-    expect(errorSpy).toHaveBeenCalled();
+    expect(altd.allowByRateLimit()).toBe(true);
+    expect(altd.allowByRateLimit()).toBe(true);
+    expect(altd.allowByRateLimit()).toBe(false);
+
+    vi.setSystemTime(new Date('2024-01-01T00:00:02Z'));
+    expect(altd.allowByRateLimit()).toBe(true);
+    vi.useRealTimers();
   });
 
-  it('filters commands with a whitelist', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', [
-      'command1',
-      'command2',
-    ]);
+  it('resolves execution via registry', () => {
+    const registry = {
+      echo: { execPath: '/bin/echo', buildArgs: (args) => args.slice(0, 1) },
+      bad: { execPath: '/bin/bad', buildArgs: () => 'nope' },
+      fail: { execPath: '/bin/fail', buildArgs: () => { throw new Error('no'); } },
+    };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
 
-    expect(altd.filterByWhitelist(undefined, undefined)).toEqual([]);
-    expect(altd.filterByWhitelist(['command1', 'arg1', 'arg2'], undefined)).toEqual(
-      []
-    );
-    expect(altd.filterByWhitelist(undefined, ['command1', 'command2'])).toEqual([]);
-    expect(altd.filterByWhitelist([], ['command1'])).toEqual([]);
-    expect(
-      altd.filterByWhitelist(['command1', 'arg1', 'arg2'], [
-        'command3',
-        'command4',
-      ])
-    ).toEqual([]);
-    expect(
-      altd.filterByWhitelist(['command1', 'arg1', 'arg2'], [
-        'command1',
-        'command2',
-      ])
-    ).toEqual(['command1', 'arg1', 'arg2']);
+    expect(altd.resolveExecution(['echo', 'hello'])).toEqual({
+      execPath: '/bin/echo',
+      args: ['hello'],
+    });
+    expect(altd.resolveExecution('nope')).toBeNull();
+    expect(altd.resolveExecution(['missing'])).toBeNull();
+    expect(altd.resolveExecution(['bad', 'x'])).toBeNull();
+    expect(altd.resolveExecution(['fail', 'x'])).toBeNull();
+    expect(altd.resolveExecution([])).toBeNull();
   });
 
-  it('detects arrays correctly', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', [
-      'command1',
-      'command2',
-    ]);
-
-    expect(altd.isArray(undefined)).toBe(false);
-    expect(altd.isArray({})).toBe(false);
-    expect(altd.isArray(1)).toBe(false);
-    expect(altd.isArray('1')).toBe(false);
-    expect(altd.isArray(['command1', 'arg1', 'arg2'])).toBe(true);
-  });
-
-  it('dispatches commands and handles output', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', ['command1']);
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('spawns with limits and handles output', () => {
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
     const stdoutWriteSpy = vi
       .spyOn(process.stdout, 'write')
       .mockImplementation(() => true);
+    const stderrWriteSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const handlers = {};
+    const stdoutHandlers = {};
+    const stderrHandlers = {};
     const proc = {
-      on: vi.fn((event, handler) => {
-        if (event === 'error') {
-          handler(new Error('spawn error'));
-        }
-      }),
       stdout: {
         on: vi.fn((event, handler) => {
-          if (event === 'data') {
-            handler(Buffer.from('ok'));
-          }
+          stdoutHandlers[event] = handler;
         }),
       },
+      stderr: {
+        on: vi.fn((event, handler) => {
+          stderrHandlers[event] = handler;
+        }),
+      },
+      on: vi.fn((event, handler) => {
+        handlers[event] = handler;
+      }),
+      kill: vi.fn(),
     };
 
-    altd.spawn = vi.fn(() => proc);
+    spawnMock.mockReturnValue(proc);
 
-    altd.dispatch(['command', 'arg1', 'arg2']);
-    expect(altd.spawn).toHaveBeenCalledWith('command', ['arg1', 'arg2']);
-    expect(stdoutWriteSpy).toHaveBeenCalledWith('ok');
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry, {
+      spawnImpl: spawnMock,
+      timeoutMs: 1,
+      maxStdoutBytes: 3,
+    });
+
+    altd.spawnLimited('/bin/echo', ['hello']);
+
+    expect(spawnMock).toHaveBeenCalledWith('/bin/echo', ['hello'], expect.any(Object));
+
+    stdoutHandlers.data(Buffer.from('ok'));
+    expect(stdoutWriteSpy).toHaveBeenCalledWith(Buffer.from('ok'));
+
+    stdoutHandlers.data(Buffer.from('toolong'));
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+
+    stderrHandlers.data(Buffer.from('err'));
+    expect(stderrWriteSpy).toHaveBeenCalledWith(Buffer.from('err'));
+
+    handlers.error(new Error('boom'));
     expect(errorSpy).toHaveBeenCalled();
-  });
 
-  it('skips dispatch when command list is empty', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', ['command1']);
-    altd.spawn = vi.fn();
-
-    altd.dispatch([]);
-    expect(altd.spawn).not.toHaveBeenCalled();
+    handlers.exit();
   });
 
   it('wires tail events and dispatches on matching lines', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', ['command1']);
-    const dispatchSpy = vi.spyOn(altd, 'dispatch').mockImplementation(() => {});
+    const registry = {
+      command1: { execPath: '/bin/echo', buildArgs: (args) => args },
+    };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
+    const spawnSpy = vi.spyOn(altd, 'spawnLimited').mockImplementation(() => {});
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     altd.run();
 
-    expect(spawnMock).toBe(altd.spawn);
     expect(tailInstances).toHaveLength(1);
 
     const tailInstance = tailInstances[0];
@@ -196,43 +217,55 @@ describe('AccessLogTailDispatcher', () => {
       ignoreInitial: true,
       persistent: true,
     });
+
     tailInstance.emit(
       'line',
       '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /command1/arg1 HTTP/1.1" 200 0 "-" "UA"'
     );
     tailInstance.emit('close');
 
-    expect(dispatchSpy).toHaveBeenCalledWith(['command1', 'arg1']);
+    expect(spawnSpy).toHaveBeenCalledWith('/bin/echo', ['arg1']);
     expect(logSpy).toHaveBeenCalledWith('watching stopped');
     expect(tailInstance.watch).toHaveBeenCalled();
   });
 
-  it('reuses an existing tail and accepts updated run arguments', () => {
-    const altd = new AccessLogTailDispatcher('/path/to/dir', ['command1']);
-    const dispatchSpy = vi.spyOn(altd, 'dispatch').mockImplementation(() => {});
-    const existingTail = {
-      on: vi.fn((event, handler) => {
-        if (event === 'line') {
-          existingTail.lineHandler = handler;
-        }
-      }),
-      watch: vi.fn(),
+  it('stops watching safely', () => {
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
+
+    altd.stop();
+    expect(tailInstances[0].unwatch).toHaveBeenCalled();
+  });
+
+  it('ignores rate-limited or invalid commands', () => {
+    const registry = {
+      command1: { execPath: '/bin/echo', buildArgs: (args) => args },
     };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry, {
+      maxPerWindow: 0,
+    });
+    const spawnSpy = vi.spyOn(altd, 'spawnLimited').mockImplementation(() => {});
 
-    altd.spawn = vi.fn();
-    altd.tail = existingTail;
+    altd.run();
 
-    altd.run('/next/path', ['command2']);
-
-    expect(altd.file).toBe('/next/path');
-    expect(altd.whitelist).toEqual(['command2']);
-    expect(existingTail.watch).toHaveBeenCalled();
-
-    existingTail.lineHandler(
-      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] \"GET /command2/arg1 HTTP/1.1\" 200 0 \"-\" \"UA\"'
+    const tailInstance = tailInstances[0];
+    tailInstance.emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /command1/arg1 HTTP/1.1" 200 0 "-" "UA"'
+    );
+    tailInstance.emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /missing/arg1 HTTP/1.1" 200 0 "-" "UA"'
     );
 
-    expect(dispatchSpy).toHaveBeenCalledWith(['command2', 'arg1']);
-    expect(tailInstances).toHaveLength(0);
+    expect(spawnSpy).not.toHaveBeenCalled();
+  });
+
+  it('stops safely when tail has no unwatch', () => {
+    const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
+    const tail = { on: vi.fn(), watch: vi.fn() };
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry, { tail });
+
+    expect(() => altd.stop()).not.toThrow();
   });
 });
