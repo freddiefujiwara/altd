@@ -1,13 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import Tail from "nodejs-tail";
 
-/**
- * Safe, modern dispatcher:
- * - command is mapped to an absolute executable path (not user-provided)
- * - args are validated per-command
- * - rate limited
- * - process is sandboxed-ish (no shell, timeout, limited output)
- */
 export default class AccessLogTailDispatcher {
   /**
    * @param {string} file access_log
@@ -25,16 +18,6 @@ export default class AccessLogTailDispatcher {
         ignoreInitial: true,
         persistent: true,
       });
-
-    // Simple rate limit: max N executions per windowMs
-    this.windowMs = opts.windowMs ?? 1000;
-    this.maxPerWindow = opts.maxPerWindow ?? 5;
-    this._windowStart = Date.now();
-    this._countInWindow = 0;
-
-    // Process limits
-    this.timeoutMs = opts.timeoutMs ?? 10_000;
-    this.maxStdoutBytes = opts.maxStdoutBytes ?? 64 * 1024;
   }
 
   /**
@@ -44,7 +27,7 @@ export default class AccessLogTailDispatcher {
    * @returns {string} pathname like "/a/b"
    */
   extractPath(line) {
-    if (typeof line !== "string" || line.length > 10_000) return "";
+    if (typeof line !== "string") return "";
 
     // Find something like: GET /foo/bar HTTP/1.1
     const m = line.match(
@@ -54,19 +37,15 @@ export default class AccessLogTailDispatcher {
 
     const rawTarget = m[2];
 
-    // rawTarget can be absolute URL or origin-form. Normalize via URL.
-    // If it's origin-form "/x", give it a dummy base.
-    let url;
-    try {
-      url = rawTarget.startsWith("/")
-        ? new URL(rawTarget, "http://localhost")
-        : new URL(rawTarget);
-    } catch {
-      return "";
+    if (rawTarget.startsWith("http://") || rawTarget.startsWith("https://")) {
+      try {
+        return new URL(rawTarget).pathname || "";
+      } catch {
+        return "";
+      }
     }
 
-    // Only use pathname; ignore query/hash to reduce attack surface.
-    return url.pathname || "";
+    return rawTarget;
   }
 
   /**
@@ -75,18 +54,14 @@ export default class AccessLogTailDispatcher {
    * @returns {string[]}
    */
   parseCommand(pathname) {
-    if (typeof pathname !== "string" || pathname === "" || pathname.length > 2048) {
-      return [];
-    }
+    if (typeof pathname !== "string" || pathname === "") return [];
     if (!pathname.startsWith("/")) return [];
 
     const parts = pathname.split("/").filter(Boolean);
     if (parts.length === 0) return [];
 
-    // Safe decode each segment; if decode fails, reject the whole request.
     const decoded = [];
     for (const p of parts) {
-      if (p.length > 256) return [];
       try {
         decoded.push(decodeURIComponent(p));
       } catch {
@@ -94,20 +69,6 @@ export default class AccessLogTailDispatcher {
       }
     }
     return decoded;
-  }
-
-  /**
-   * Basic rate limit to avoid log-triggered fork bombs.
-   * @returns {boolean} allowed
-   */
-  allowByRateLimit() {
-    const now = Date.now();
-    if (now - this._windowStart >= this.windowMs) {
-      this._windowStart = now;
-      this._countInWindow = 0;
-    }
-    this._countInWindow += 1;
-    return this._countInWindow <= this.maxPerWindow;
   }
 
   /**
@@ -123,53 +84,18 @@ export default class AccessLogTailDispatcher {
     const entry = this.registry[cmd];
     if (!entry) return null;
 
-    // Build args via per-command validator
-    let args;
-    try {
-      args = entry.buildArgs(rawArgs);
-    } catch {
-      return null;
-    }
+    const buildArgs = entry.buildArgs ?? ((args) => args);
+    const args = buildArgs(rawArgs);
     if (!Array.isArray(args)) return null;
 
     return { execPath: entry.execPath, args };
   }
 
-  /**
-   * Spawn with limits
-   * @param {string} execPath
-   * @param {string[]} args
-   */
-  spawnLimited(execPath, args) {
+  spawnCommand(execPath, args) {
     const proc = this.spawnImpl(execPath, args, {
       shell: false,
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        // Minimal env is often safer; adjust as needed
-        PATH: process.env.PATH ?? "",
-      },
-    });
-
-    // Timeout
-    const t = setTimeout(() => {
-      proc.kill("SIGKILL");
-    }, this.timeoutMs);
-    proc.on("exit", () => clearTimeout(t));
-
-    // Output limiting
-    let outBytes = 0;
-    proc.stdout.on("data", (buf) => {
-      outBytes += buf.length;
-      if (outBytes > this.maxStdoutBytes) {
-        proc.kill("SIGKILL");
-        return;
-      }
-      process.stdout.write(buf);
-    });
-
-    proc.stderr.on("data", (buf) => {
-      process.stderr.write(buf);
+      stdio: "inherit",
     });
 
     proc.on("error", (err) => {
@@ -182,14 +108,12 @@ export default class AccessLogTailDispatcher {
    */
   run() {
     this.tail.on("line", (line) => {
-      if (!this.allowByRateLimit()) return;
-
       const pathname = this.extractPath(line);
       const parsed = this.parseCommand(pathname);
       const exec = this.resolveExecution(parsed);
       if (!exec) return;
 
-      this.spawnLimited(exec.execPath, exec.args);
+      this.spawnCommand(exec.execPath, exec.args);
     });
 
     this.tail.on("close", () => {
