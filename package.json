@@ -1,6 +1,6 @@
 {
   "name": "altd",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Access log tail dispatcher",
   "type": "module",
   "bin": {
@@ -21,7 +21,8 @@
   "scripts": {
     "build": "node scripts/build.js",
     "test": "vitest run --coverage",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
   },
   "repository": {
     "type": "git",
@@ -48,6 +49,9 @@
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.8",
     "vitest": "^2.1.8"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "vitest": {
     "coverage": {
