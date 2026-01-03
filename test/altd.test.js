@@ -53,11 +53,18 @@ describe('AccessLogTailDispatcher', () => {
 
     expect(altd.file).toBe('/path/to/dir');
     expect(altd.registry).toBe(registry);
+    expect(altd.maxConcurrent).toBe(Infinity);
+    expect(altd.minIntervalMs).toBe(0);
+    expect(altd.maxParts).toBe(32);
+    expect(altd.maxPartLength).toBe(200);
+    expect(altd.maxArgLength).toBe(200);
+    expect(altd.maxPathLength).toBe(2048);
   });
 
   it('extracts a pathname from log lines', () => {
     const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
     const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
+    const limited = new AccessLogTailDispatcher('/path/to/dir', registry, { maxPathLength: 8 });
 
     expect(altd.extractPath({})).toBe('');
     expect(altd.extractPath('')).toBe('');
@@ -86,6 +93,11 @@ describe('AccessLogTailDispatcher', () => {
           + 'http://example.com/hi HTTP/1.1" 200 0 "-" "UA"'
       )
     ).toBe('/hi');
+    expect(
+      limited.extractPath(
+        '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /too/long/path HTTP/1.1" 200 0 "-" "UA"'
+      )
+    ).toBe('');
     expect(
       altd.extractPath(
         '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET http://% HTTP/1.1" 200 0 "-" "UA"'
@@ -116,6 +128,10 @@ describe('AccessLogTailDispatcher', () => {
   it('parses command and args safely', () => {
     const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
     const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
+    const limited = new AccessLogTailDispatcher('/path/to/dir', registry, {
+      maxParts: 2,
+      maxPartLength: 3,
+    });
 
     expect(altd.parseCommand()).toEqual([]);
     expect(altd.parseCommand('')).toEqual([]);
@@ -126,6 +142,8 @@ describe('AccessLogTailDispatcher', () => {
       'Hello World',
     ]);
     expect(altd.parseCommand('/test/%E0%A4%A')).toEqual([]);
+    expect(limited.parseCommand('/too/many/parts')).toEqual([]);
+    expect(limited.parseCommand('/toolong')).toEqual([]);
   });
 
   it('resolves execution via registry', () => {
@@ -133,12 +151,13 @@ describe('AccessLogTailDispatcher', () => {
       echo: { execPath: '/bin/echo', buildArgs: (args) => args.slice(0, 1) },
       bad: { execPath: '/bin/bad', buildArgs: () => 'nope' },
     };
-    const altd = new AccessLogTailDispatcher('/path/to/dir', registry);
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry, { maxArgLength: 2 });
 
-    expect(altd.resolveExecution(['echo', 'hello'])).toEqual({
+    expect(altd.resolveExecution(['echo', 'hi'])).toEqual({
       execPath: '/bin/echo',
-      args: ['hello'],
+      args: ['hi'],
     });
+    expect(altd.resolveExecution(['echo', 'toolong'])).toBeNull();
     expect(altd.resolveExecution('nope')).toBeNull();
     expect(altd.resolveExecution(['missing'])).toBeNull();
     expect(altd.resolveExecution(['bad', 'x'])).toBeNull();
@@ -158,6 +177,7 @@ describe('AccessLogTailDispatcher', () => {
   it('spawns commands with the configured spawn implementation', () => {
     const registry = { echo: { execPath: '/bin/echo', buildArgs: (args) => args } };
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
 
     const handlers = {};
     const proc = {
@@ -168,14 +188,26 @@ describe('AccessLogTailDispatcher', () => {
 
     spawnMock.mockReturnValue(proc);
 
-    const altd = new AccessLogTailDispatcher('/path/to/dir', registry, { spawnImpl: spawnMock });
+    const altd = new AccessLogTailDispatcher('/path/to/dir', registry, {
+      spawnImpl: spawnMock,
+      maxConcurrent: 1,
+      minIntervalMs: 500,
+    });
 
     altd.spawnCommand('/bin/echo', ['hello']);
+    altd.spawnCommand('/bin/echo', ['blocked']);
 
     expect(spawnMock).toHaveBeenCalledWith('/bin/echo', ['hello'], expect.any(Object));
 
     handlers.error(new Error('boom'));
+    handlers.close();
+    handlers.exit();
     expect(errorSpy).toHaveBeenCalled();
+    expect(altd.activeCount).toBe(0);
+
+    nowSpy.mockReturnValue(1600);
+    altd.spawnCommand('/bin/echo', ['after']);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
   });
 
   it('wires tail events and dispatches on matching lines', () => {

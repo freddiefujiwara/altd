@@ -18,6 +18,14 @@ export default class AccessLogTailDispatcher {
         ignoreInitial: true,
         persistent: true,
       });
+    this.maxConcurrent = opts.maxConcurrent ?? Infinity;
+    this.minIntervalMs = opts.minIntervalMs ?? 0;
+    this.maxParts = opts.maxParts ?? 32;
+    this.maxPartLength = opts.maxPartLength ?? 200;
+    this.maxArgLength = opts.maxArgLength ?? this.maxPartLength;
+    this.maxPathLength = opts.maxPathLength ?? 2048;
+    this.activeCount = 0;
+    this.lastExecAt = Number.NEGATIVE_INFINITY;
   }
 
   /**
@@ -37,15 +45,17 @@ export default class AccessLogTailDispatcher {
 
     const rawTarget = m[2];
 
-    if (rawTarget.startsWith("http://") || rawTarget.startsWith("https://")) {
-      try {
-        return new URL(rawTarget).pathname || "";
-      } catch {
-        return "";
-      }
+    try {
+      const base = rawTarget.startsWith("http://")
+        || rawTarget.startsWith("https://")
+        ? undefined
+        : "http://localhost";
+      const url = base ? new URL(rawTarget, base) : new URL(rawTarget);
+      if (!url.pathname || url.pathname.length > this.maxPathLength) return "";
+      return url.pathname;
+    } catch {
+      return "";
     }
-
-    return rawTarget;
   }
 
   /**
@@ -59,11 +69,15 @@ export default class AccessLogTailDispatcher {
 
     const parts = pathname.split("/").filter(Boolean);
     if (parts.length === 0) return [];
+    if (parts.length > this.maxParts) return [];
 
     const decoded = [];
     for (const p of parts) {
+      if (p.length > this.maxPartLength) return [];
       try {
-        decoded.push(decodeURIComponent(p));
+        const value = decodeURIComponent(p);
+        if (value.length > this.maxPartLength) return [];
+        decoded.push(value);
       } catch {
         return [];
       }
@@ -87,19 +101,32 @@ export default class AccessLogTailDispatcher {
     const buildArgs = entry.buildArgs ?? ((args) => args);
     const args = buildArgs(rawArgs);
     if (!Array.isArray(args)) return null;
+    if (args.some((arg) => arg.length > this.maxArgLength)) return null;
 
     return { execPath: entry.execPath, args };
   }
 
   spawnCommand(execPath, args) {
+    if (this.activeCount >= this.maxConcurrent) return;
+    const now = Date.now();
+    if (now - this.lastExecAt < this.minIntervalMs) return;
+
     const proc = this.spawnImpl(execPath, args, {
       shell: false,
       windowsHide: true,
       stdio: "inherit",
     });
+    this.activeCount += 1;
+    this.lastExecAt = now;
 
     proc.on("error", (err) => {
       console.error("[spawn error]", err);
+    });
+    proc.on("close", () => {
+      this.activeCount = Math.max(0, this.activeCount - 1);
+    });
+    proc.on("exit", () => {
+      this.activeCount = Math.max(0, this.activeCount - 1);
     });
   }
 
