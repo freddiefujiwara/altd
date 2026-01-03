@@ -55,10 +55,10 @@ describe('AccessLogTailDispatcher', () => {
     expect(altd.registry).toBe(registry);
     expect(altd.maxConcurrent).toBe(Infinity);
     expect(altd.minIntervalMs).toBe(0);
-    expect(altd.maxParts).toBe(32);
-    expect(altd.maxPartLength).toBe(200);
-    expect(altd.maxArgLength).toBe(200);
-    expect(altd.maxPathLength).toBe(2048);
+    expect(altd.maxParts).toBe(64);
+    expect(altd.maxPartLength).toBe(1024);
+    expect(altd.maxArgLength).toBe(1024);
+    expect(altd.maxPathLength).toBe(8192);
   });
 
   it('extracts a pathname from log lines', () => {

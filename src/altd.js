@@ -20,10 +20,10 @@ export default class AccessLogTailDispatcher {
       });
     this.maxConcurrent = opts.maxConcurrent ?? Infinity;
     this.minIntervalMs = opts.minIntervalMs ?? 0;
-    this.maxParts = opts.maxParts ?? 32;
-    this.maxPartLength = opts.maxPartLength ?? 200;
+    this.maxParts = opts.maxParts ?? 64;
+    this.maxPartLength = opts.maxPartLength ?? 1024;
     this.maxArgLength = opts.maxArgLength ?? this.maxPartLength;
-    this.maxPathLength = opts.maxPathLength ?? 2048;
+    this.maxPathLength = opts.maxPathLength ?? 8192;
     this.activeCount = 0;
     this.lastExecAt = Number.NEGATIVE_INFINITY;
   }
