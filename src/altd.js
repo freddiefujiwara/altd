@@ -1,5 +1,11 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import Tail from "nodejs-tail";
+import util from "node:util";
+
+if (util.isArray !== Array.isArray) {
+  util.isArray = Array.isArray;
+}
+
+const { default: Tail } = await import("nodejs-tail");
 
 export default class AccessLogTailDispatcher {
   /**
