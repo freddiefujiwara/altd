@@ -25,8 +25,8 @@ class TailMock {
 
 const spawnMock = vi.fn();
 
-vi.mock('nodejs-tail', () => ({
-  default: TailMock,
+vi.mock('tail', () => ({
+  Tail: TailMock,
 }));
 
 vi.mock('node:child_process', () => ({
@@ -225,19 +225,16 @@ describe('AccessLogTailDispatcher', () => {
     const tailInstance = tailInstances[0];
     expect(tailInstance.file).toBe('/path/to/dir');
     expect(tailInstance.options).toEqual({
-      alwaysStat: true,
-      ignoreInitial: true,
-      persistent: true,
+      fromBeginning: false,
+      follow: true,
     });
 
     tailInstance.emit(
       'line',
       '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /command1/arg1 HTTP/1.1" 200 0 "-" "UA"'
     );
-    tailInstance.emit('close');
 
     expect(spawnSpy).toHaveBeenCalledWith('/bin/echo', ['arg1']);
-    expect(logSpy).toHaveBeenCalledWith('watching stopped');
     expect(tailInstance.watch).toHaveBeenCalled();
   });
 

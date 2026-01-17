@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import Tail from "nodejs-tail";
+import { Tail } from "tail";
 
 export default class AccessLogTailDispatcher {
   /**
@@ -14,9 +14,8 @@ export default class AccessLogTailDispatcher {
     this.spawnImpl = opts.spawnImpl ?? nodeSpawn;
     this.tail = opts.tail
       ?? new Tail(file, {
-        alwaysStat: true,
-        ignoreInitial: true,
-        persistent: true,
+        fromBeginning: false,
+        follow: true,
       });
     this.maxConcurrent = opts.maxConcurrent ?? Infinity;
     this.minIntervalMs = opts.minIntervalMs ?? 0;
@@ -141,10 +140,6 @@ export default class AccessLogTailDispatcher {
       if (!exec) return;
 
       this.spawnCommand(exec.execPath, exec.args);
-    });
-
-    this.tail.on("close", () => {
-      console.log("watching stopped");
     });
 
     this.tail.watch();
