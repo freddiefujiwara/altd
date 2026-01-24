@@ -12,6 +12,13 @@ describe('cli', () => {
   let originalArgv;
   let originalExit;
 
+  const setupDispatcher = () => {
+    mockDispatcher.mockImplementation((file, registry) => {
+      ctorSpy(file, registry);
+      return { run: runSpy };
+    });
+  };
+
   beforeEach(() => {
     originalArgv = process.argv;
     originalExit = process.exit;
@@ -34,10 +41,7 @@ describe('cli', () => {
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    mockDispatcher.mockImplementation((file, registry) => {
-      ctorSpy(file, registry);
-      return { run: runSpy };
-    });
+    setupDispatcher();
 
     await expect(import('../index.js')).rejects.toThrow('exit 1');
     expect(logSpy).toHaveBeenCalledWith('altd <file> -w <commands...>');
@@ -47,10 +51,7 @@ describe('cli', () => {
     process.argv = ['node', 'index.js', '/tmp/access.log', '-w', 'echo,ls'];
     process.exit = vi.fn();
 
-    mockDispatcher.mockImplementation((file, registry) => {
-      ctorSpy(file, registry);
-      return { run: runSpy };
-    });
+    setupDispatcher();
 
     await import('../index.js');
 
