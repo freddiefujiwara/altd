@@ -308,4 +308,92 @@ describe('AccessLogTailDispatcher', () => {
 
     expect(() => altd.stop()).not.toThrow();
   });
+  it('runs commands whose arguments match a rule', () => {
+    const altd = makeDispatcher(
+      { argRules: { command1: [/^arg1$/] } },
+      { command1: { execPath: '/bin/echo', buildArgs: (args) => args } }
+    );
+    const spawnSpy = vi.spyOn(altd, 'spawnCommand').mockImplementation(() => {});
+
+    altd.run();
+    tailInstances[0].emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /command1/arg1 HTTP/1.1" 200 0 "-" "UA"'
+    );
+
+    expect(spawnSpy).toHaveBeenCalledWith('/bin/echo', ['arg1']);
+  });
+
+  it('blocks commands whose arguments match no rule and logs them', () => {
+    const logger = { error: vi.fn() };
+    const altd = makeDispatcher(
+      { argRules: { command1: [/^ok$/] }, logger },
+      { command1: { execPath: '/bin/echo', buildArgs: (args) => args } }
+    );
+    const spawnSpy = vi.spyOn(altd, 'spawnCommand').mockImplementation(() => {});
+
+    altd.run();
+    tailInstances[0].emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /command1/nope HTTP/1.1" 200 0 "-" "UA"'
+    );
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      '[altd] blocked (no matching rule): command1 nope'
+    );
+  });
+
+  it('blocks whitelisted commands that have no rules', () => {
+    const logger = { error: vi.fn() };
+    const altd = makeDispatcher(
+      { argRules: { other: [/^x$/] }, logger },
+      { command1: { execPath: '/bin/echo', buildArgs: (args) => args } }
+    );
+    const spawnSpy = vi.spyOn(altd, 'spawnCommand').mockImplementation(() => {});
+
+    altd.run();
+    tailInstances[0].emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /command1/arg1 HTTP/1.1" 200 0 "-" "UA"'
+    );
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      '[altd] blocked (no matching rule): command1 arg1'
+    );
+  });
+
+  it('logs unknown commands when rules are enabled', () => {
+    const logger = { error: vi.fn() };
+    const altd = makeDispatcher({ argRules: {}, logger });
+    const spawnSpy = vi.spyOn(altd, 'spawnCommand').mockImplementation(() => {});
+
+    altd.run();
+    tailInstances[0].emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /missing/arg1 HTTP/1.1" 200 0 "-" "UA"'
+    );
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      '[altd] blocked (unknown command): missing arg1'
+    );
+  });
+
+  it('stays silent about skipped requests when rules are disabled', () => {
+    const logger = { error: vi.fn() };
+    const altd = makeDispatcher({ logger });
+    const spawnSpy = vi.spyOn(altd, 'spawnCommand').mockImplementation(() => {});
+
+    altd.run();
+    tailInstances[0].emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /missing/arg1 HTTP/1.1" 200 0 "-" "UA"'
+    );
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
 });
+

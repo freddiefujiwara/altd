@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { Command } from 'commander';
 import AccessLogTailDispatcher from './src/altd.js';
@@ -29,17 +30,55 @@ program
     'Add commands to whitelist',
     (commands) => commands.split(',').map((command) => command.trim()).filter(Boolean)
   )
+  .option(
+    '--rules <file>',
+    'JSON file with per-command argument rules (regular expressions matched against the space-joined arguments)'
+  )
   .parse(process.argv);
 
 const fileValue = program.args[0];
-const { whitelist } = program.opts();
+const { whitelist, rules } = program.opts();
 
 if (!fileValue || !whitelist || whitelist.length === 0) {
   console.log('altd <file> -w <commands...>');
   process.exit(1);
 }
 
-const registry = buildRegistry(whitelist);
+const loadArgRules = (file) => {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (err) {
+    console.error(`altd: cannot load rules file ${file}: ${err.message}`);
+    process.exit(1);
+  }
 
-const altd = new AccessLogTailDispatcher(fileValue, registry);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error('altd: rules file must be a JSON object keyed by command name');
+    process.exit(1);
+  }
+
+  const rules = {};
+  for (const [command, patterns] of Object.entries(parsed)) {
+    if (
+      !Array.isArray(patterns) ||
+      patterns.some((pattern) => typeof pattern !== 'string')
+    ) {
+      console.error(`altd: rules for "${command}" must be an array of strings`);
+      process.exit(1);
+    }
+    try {
+      rules[command] = patterns.map((pattern) => new RegExp(pattern));
+    } catch (err) {
+      console.error(`altd: invalid regular expression for "${command}": ${err.message}`);
+      process.exit(1);
+    }
+  }
+  return rules;
+};
+
+const registry = buildRegistry(whitelist);
+const argRules = rules ? loadArgRules(rules) : undefined;
+
+const altd = new AccessLogTailDispatcher(fileValue, registry, { argRules });
 altd.run();

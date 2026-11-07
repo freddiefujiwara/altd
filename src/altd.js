@@ -18,6 +18,10 @@ const { default: Tail } = await import("nodejs-tail");
  * @property {number} [maxPartLength]
  * @property {number} [maxArgLength]
  * @property {number} [maxPathLength]
+ * @property {Record<string, RegExp[]>} [argRules] when set, a command runs
+ *   only if one of its argument patterns matches; commands without patterns
+ *   are blocked, and blocked attempts are logged through `logger`
+ * @property {{ error: Function }} [logger]
  */
 
 const REQUEST_LINE_REGEX =
@@ -91,7 +95,7 @@ const decodePathParts = (pathname, maxParts, maxPartLength) => {
  * @param {number} maxArgLength
  * @returns {{execPath: string, args: string[]} | null}
  */
-const resolveExecutionFromRegistry = (parsed, registry, maxArgLength) => {
+const resolveExecutionFromRegistry = (parsed, registry, maxArgLength, argRules) => {
   if (!Array.isArray(parsed) || parsed.length === 0) return null;
 
   const [cmd, ...rawArgs] = parsed;
@@ -102,8 +106,26 @@ const resolveExecutionFromRegistry = (parsed, registry, maxArgLength) => {
   const args = buildArgs(rawArgs);
   if (!Array.isArray(args)) return null;
   if (args.some((arg) => arg.length > maxArgLength)) return null;
+  if (argRules && !isAllowedByRules(argRules, cmd, args)) return null;
 
   return { execPath, args };
+};
+
+/**
+ * Check decoded arguments against the per-command argument rules.
+ * The arguments are joined with single spaces and must match at least one
+ * of the command's patterns in full or in part (patterns carry their own
+ * anchors). A command without patterns never matches.
+ * @param {Record<string, RegExp[]>} rules
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {boolean}
+ */
+const isAllowedByRules = (rules, command, args) => {
+  const patterns = rules[command];
+  if (!patterns) return false;
+  const joined = args.join(" ");
+  return patterns.some((pattern) => pattern.test(joined));
 };
 
 export default class AccessLogTailDispatcher {
@@ -129,6 +151,8 @@ export default class AccessLogTailDispatcher {
       maxPartLength = 1024,
       maxArgLength = maxPartLength,
       maxPathLength = 8192,
+      argRules = null,
+      logger = console,
     } = opts;
 
     this.spawnImpl = spawnImpl;
@@ -139,6 +163,8 @@ export default class AccessLogTailDispatcher {
     this.maxPartLength = maxPartLength;
     this.maxArgLength = maxArgLength;
     this.maxPathLength = maxPathLength;
+    this.argRules = argRules;
+    this.logger = logger;
     this.activeCount = 0;
     this.lastExecAt = Number.NEGATIVE_INFINITY;
   }
@@ -170,7 +196,32 @@ export default class AccessLogTailDispatcher {
    * @returns {{execPath:string,args:string[]}|null}
    */
   resolveExecution(parsed) {
-    return resolveExecutionFromRegistry(parsed, this.registry, this.maxArgLength);
+    return resolveExecutionFromRegistry(
+      parsed,
+      this.registry,
+      this.maxArgLength,
+      this.argRules
+    );
+  }
+
+  /**
+   * Log a request that was not executed. Only active when argument rules
+   * are configured: in that strict mode every skipped request is recorded
+   * so that unexpected callers stay visible.
+   * @param {string[]} parsed ["cmd", ...args]
+   * @returns {void}
+   */
+  logBlocked(parsed) {
+    if (!this.argRules) return;
+    if (!Array.isArray(parsed) || parsed.length === 0) return;
+
+    const [command, ...args] = parsed;
+    const reason = this.registry[command]
+      ? "no matching rule"
+      : "unknown command";
+    this.logger.error(
+      `[altd] blocked (${reason}): ${[command, ...args].join(" ")}`
+    );
   }
 
   /**
@@ -208,7 +259,10 @@ export default class AccessLogTailDispatcher {
       const pathname = this.extractPath(line);
       const parsed = this.parseCommand(pathname);
       const exec = this.resolveExecution(parsed);
-      if (!exec) return;
+      if (!exec) {
+        this.logBlocked(parsed);
+        return;
+      }
 
       this.spawnCommand(exec.execPath, exec.args);
     };
