@@ -16,7 +16,7 @@ describe('cli', () => {
   let originalExit;
 
   const setupDispatcher = () => {
-    mockDispatcher.mockImplementation((file, registry) => {
+    mockDispatcher.mockImplementation(function (file, registry) {
       ctorSpy(file, registry);
       return { run: runSpy };
     });
@@ -73,7 +73,7 @@ describe('cli', () => {
     process.exit = vi.fn();
 
     let ctorOpts;
-    mockDispatcher.mockImplementation((file, registry, opts) => {
+    mockDispatcher.mockImplementation(function (file, registry, opts) {
       ctorSpy(file, registry);
       ctorOpts = opts;
       return { run: runSpy };
