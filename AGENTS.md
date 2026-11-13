@@ -28,5 +28,5 @@
 - If behavior changes affect CLI usage, update `README.md` examples.
 
 ## Security & Configuration Notes
-- Commands are executed exactly as whitelisted; there is no PATH resolution or argument validation.
+- Commands are executed exactly as whitelisted; there is no PATH resolution. When `--rules <file>` is given, arguments are also validated against per-command regular expressions, and requests that match no rule are blocked and logged.
 - Treat access logs as trusted input, and keep whitelists explicit (e.g., `-w /bin/ls,/usr/bin/hostname`).

@@ -10,7 +10,9 @@ const pkg = require('./package.json');
 const program = new Command();
 
 const buildRegistry = (whitelist) => {
-  const registry = {};
+  // Null-prototype map: command names must never resolve to inherited
+  // Object.prototype members such as "__proto__" or "toString".
+  const registry = Object.create(null);
   for (const command of whitelist) {
     registry[command] = {
       execPath: command,
@@ -58,7 +60,7 @@ const loadArgRules = (file) => {
     process.exit(1);
   }
 
-  const rules = {};
+  const rules = Object.create(null);
   for (const [command, patterns] of Object.entries(parsed)) {
     if (
       !Array.isArray(patterns) ||
