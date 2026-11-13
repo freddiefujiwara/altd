@@ -90,6 +90,36 @@ describe('cli', () => {
     expect(process.exit).not.toHaveBeenCalled();
   });
 
+  it('builds prototype-safe registry and rules maps', async () => {
+    const rulesPath = join(tmpdir(), 'altd-rules-proto-test.json');
+    writeFileSync(
+      rulesPath,
+      JSON.stringify({ echo: ['^a$'], ['__proto__']: ['^x$'] })
+    );
+    process.argv = ['node', 'index.js', '/tmp/access.log', '-w', 'echo', '--rules', rulesPath];
+    process.exit = vi.fn();
+
+    let ctorOpts;
+    mockDispatcher.mockImplementation(function (file, registry, opts) {
+      ctorSpy(file, registry);
+      ctorOpts = opts;
+      return { run: runSpy };
+    });
+
+    await import('../index.js');
+
+    const [, registry] = ctorSpy.mock.calls[0];
+    expect(Object.getPrototypeOf(registry)).toBeNull();
+    expect(registry.echo.execPath).toBe('echo');
+    expect(Object.getPrototypeOf(ctorOpts.argRules)).toBeNull();
+    expect(ctorOpts.argRules.echo[0].test('a')).toBe(true);
+    // A "__proto__" key in the rules file is stored as data, not treated
+    // as a prototype mutation.
+    expect(Object.hasOwn(ctorOpts.argRules, '__proto__')).toBe(true);
+    expect(ctorOpts.argRules['__proto__'][0].test('x')).toBe(true);
+    expect(runSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('exits when the rules file cannot be loaded', async () => {
     process.argv = ['node', 'index.js', '/tmp/access.log', '-w', 'echo', '--rules', '/nonexistent/rules.json'];
     process.exit = vi.fn((code) => {

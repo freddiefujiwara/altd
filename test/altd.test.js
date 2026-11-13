@@ -395,5 +395,134 @@ describe('AccessLogTailDispatcher', () => {
     expect(spawnSpy).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
   });
+
+  it('rejects request targets that URL normalization would rewrite', () => {
+    const altd = makeDispatcher();
+    const line = (target) =>
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET '
+      + target
+      + ' HTTP/1.1" 200 0 "-" "UA"';
+
+    // Dot segments (plain, percent-encoded, mixed case) and backslash
+    // separators must not let a request name one command while URL
+    // normalization silently dispatches another.
+    expect(altd.extractPath(line('/ogp/../switchbot-tv/on'))).toBe('');
+    expect(altd.extractPath(line('/ogp/%2e%2e/switchbot-tv/on'))).toBe('');
+    expect(altd.extractPath(line('/ogp/%2E%2E/switchbot-tv/on'))).toBe('');
+    expect(altd.extractPath(line('/ogp/./switchbot-tv/on'))).toBe('');
+    expect(altd.extractPath(line('/ogp\\..\\switchbot-tv/on'))).toBe('');
+    // Percent-encoded payload segments stay untouched: normalization
+    // does not rewrite them, so they are not rejected.
+    expect(altd.extractPath(line('/ogp/https%3A%2F%2Fexample.com'))).toBe(
+      '/ogp/https%3A%2F%2Fexample.com'
+    );
+    expect(altd.extractPath(line('/ogp/plain-arg'))).toBe('/ogp/plain-arg');
+  });
+
+  it('does not dispatch a different command via a traversal target', () => {
+    const altd = makeDispatcher({}, {
+      ogp: { execPath: '/bin/ogp', buildArgs: (args) => args },
+      'switchbot-tv': { execPath: '/bin/switchbot-tv', buildArgs: (args) => args },
+    });
+    const spawnSpy = vi.spyOn(altd, 'spawnCommand').mockImplementation(() => {});
+
+    altd.run();
+    const tailInstance = tailInstances[0];
+    tailInstance.emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /ogp/%2e%2e/switchbot-tv/on HTTP/1.1" 200 0 "-" "UA"'
+    );
+    expect(spawnSpy).not.toHaveBeenCalled();
+
+    tailInstance.emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /ogp/https%3A%2F%2Fexample.com HTTP/1.1" 200 0 "-" "UA"'
+    );
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+    expect(spawnSpy).toHaveBeenCalledWith('/bin/ogp', ['https://example.com']);
+  });
+
+  it('rejects paths whose decoded parts contain a NUL byte', () => {
+    const altd = makeDispatcher();
+
+    expect(altd.parseCommand('/echo/%00')).toEqual([]);
+    expect(altd.parseCommand('/echo/a%00b')).toEqual([]);
+    expect(altd.parseCommand('/echo/ok')).toEqual(['echo', 'ok']);
+  });
+
+  it('does not dispatch commands with NUL bytes in arguments', () => {
+    const altd = makeDispatcher({}, {
+      command1: { execPath: '/bin/echo', buildArgs: (args) => args },
+    });
+    const spawnSpy = vi.spyOn(altd, 'spawnCommand').mockImplementation(() => {});
+
+    altd.run();
+    tailInstances[0].emit(
+      'line',
+      '127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /command1/a%00b HTTP/1.1" 200 0 "-" "UA"'
+    );
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+  });
+
+  it('survives a synchronously throwing spawn implementation', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const throwingSpawn = vi.fn(() => {
+      throw new TypeError('The argument "args" must not contain null bytes');
+    });
+    const altd = makeDispatcher({ spawnImpl: throwingSpawn });
+
+    expect(() => altd.spawnCommand('/bin/echo', ['a\0b'])).not.toThrow();
+    expect(throwingSpawn).toHaveBeenCalledTimes(1);
+    expect(altd.activeCount).toBe(0);
+    expect(errorSpy).toHaveBeenCalledWith('[spawn error]', expect.any(Error));
+  });
+
+  it('treats prototype property names as unknown commands', () => {
+    const altd = makeDispatcher();
+
+    expect(altd.resolveExecution(['__proto__'])).toBeNull();
+    expect(altd.resolveExecution(['constructor'])).toBeNull();
+    expect(altd.resolveExecution(['toString'])).toBeNull();
+  });
+
+  it('logs prototype property names as unknown commands when rules are enabled', () => {
+    const logger = { error: vi.fn() };
+    const altd = makeDispatcher({ argRules: {}, logger });
+    const spawnSpy = vi.spyOn(altd, 'spawnCommand').mockImplementation(() => {});
+
+    altd.run();
+    const tailInstance = tailInstances[0];
+    for (const name of ['__proto__', 'constructor', 'toString']) {
+      tailInstance.emit(
+        'line',
+        `127.0.0.1 - - [01/Jan/2024:00:00:00 +0000] "GET /${name}/x HTTP/1.1" 200 0 "-" "UA"`
+      );
+    }
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      '[altd] blocked (unknown command): __proto__ x'
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      '[altd] blocked (unknown command): constructor x'
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      '[altd] blocked (unknown command): toString x'
+    );
+  });
+
+  it('does not mistake inherited rule entries for configured patterns', () => {
+    const altd = makeDispatcher(
+      { argRules: {} },
+      { toString: { execPath: '/bin/echo', buildArgs: (args) => args } }
+    );
+
+    // "toString" is whitelisted here, but the plain-object rules map has
+    // no own "toString" patterns; the inherited Object.prototype member
+    // must not be treated as a pattern list (it has no .some and would
+    // crash, or worse, match).
+    expect(altd.resolveExecution(['toString', 'x'])).toBeNull();
+  });
 });
 

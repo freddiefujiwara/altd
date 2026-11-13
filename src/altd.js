@@ -39,6 +39,21 @@ const parseRequestTarget = (line) => {
 };
 
 /**
+ * Extract the path portion of a raw request target exactly as written,
+ * before any URL normalization: strips an absolute-form scheme/authority
+ * prefix and any query or fragment suffix.
+ * @param {string} rawTarget
+ * @returns {string}
+ */
+const rawPathPortion = (rawTarget) => {
+  let rest = rawTarget;
+  const scheme = rest.match(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/);
+  if (scheme) rest = rest.slice(scheme[0].length);
+  const cut = rest.search(/[?#]/);
+  return cut === -1 ? rest : rest.slice(0, cut);
+};
+
+/**
  * Normalize a raw request target into a safe pathname.
  * @param {string} rawTarget
  * @param {number} maxPathLength
@@ -54,6 +69,11 @@ const toSafePathname = (rawTarget, maxPathLength) => {
     const url = base ? new URL(rawTarget, base) : new URL(rawTarget);
     const { pathname } = url;
     if (!pathname || pathname.length > maxPathLength) return "";
+    // Reject targets that URL parsing rewrote (dot segments such as ".."
+    // or "%2e%2e", backslash separators, and similar): dispatching on the
+    // normalized path could run a different command than the one the
+    // request actually named.
+    if (pathname !== rawPathPortion(rawTarget)) return "";
     return pathname;
   } catch {
     return "";
@@ -78,6 +98,9 @@ const decodePathParts = (pathname, maxParts, maxPartLength) => {
   for (const part of parts) {
     try {
       const value = decodeURIComponent(part);
+      // A NUL byte would make spawn() throw synchronously; reject the
+      // whole path instead of letting it reach a command argument.
+      if (value.includes("\0")) return [];
       if (value.length > maxPartLength) return [];
       if (part.length > maxPartLength) return [];
       decoded.push(value);
@@ -99,7 +122,9 @@ const resolveExecutionFromRegistry = (parsed, registry, maxArgLength, argRules) 
   if (!Array.isArray(parsed) || parsed.length === 0) return null;
 
   const [cmd, ...rawArgs] = parsed;
-  const entry = registry[cmd];
+  // Own-property lookup only: names like "__proto__", "constructor" or
+  // "toString" must not resolve to inherited Object.prototype members.
+  const entry = Object.hasOwn(registry, cmd) ? registry[cmd] : undefined;
   if (!entry) return null;
 
   const { execPath, buildArgs = (args) => args } = entry;
@@ -122,7 +147,7 @@ const resolveExecutionFromRegistry = (parsed, registry, maxArgLength, argRules) 
  * @returns {boolean}
  */
 const isAllowedByRules = (rules, command, args) => {
-  const patterns = rules[command];
+  const patterns = Object.hasOwn(rules, command) ? rules[command] : undefined;
   if (!patterns) return false;
   const joined = args.join(" ");
   return patterns.some((pattern) => pattern.test(joined));
@@ -216,7 +241,7 @@ export default class AccessLogTailDispatcher {
     if (!Array.isArray(parsed) || parsed.length === 0) return;
 
     const [command, ...args] = parsed;
-    const reason = this.registry[command]
+    const reason = Object.hasOwn(this.registry, command)
       ? "no matching rule"
       : "unknown command";
     this.logger.error(
@@ -235,11 +260,20 @@ export default class AccessLogTailDispatcher {
     const now = Date.now();
     if (now - this.lastExecAt < this.minIntervalMs) return;
 
-    const proc = this.spawnImpl(execPath, args, {
-      shell: false,
-      windowsHide: true,
-      stdio: "inherit",
-    });
+    let proc;
+    try {
+      proc = this.spawnImpl(execPath, args, {
+        shell: false,
+        windowsHide: true,
+        stdio: "inherit",
+      });
+    } catch (err) {
+      // spawn() throws synchronously for invalid arguments (e.g. a NUL
+      // byte in an argument); log and skip so one bad request can never
+      // kill the daemon.
+      console.error("[spawn error]", err);
+      return;
+    }
     this.activeCount += 1;
     this.lastExecAt = now;
     const decrementActive = () => {
