@@ -130,7 +130,10 @@ const resolveExecutionFromRegistry = (parsed, registry, maxArgLength, argRules) 
   const { execPath, buildArgs = (args) => args } = entry;
   const args = buildArgs(rawArgs);
   if (!Array.isArray(args)) return null;
-  if (args.some((arg) => arg.length > maxArgLength)) return null;
+  // spawn() only accepts string arguments; anything else a registry's
+  // buildArgs produces fails closed here instead of throwing on the
+  // length check or reaching spawn.
+  if (args.some((arg) => typeof arg !== "string" || arg.length > maxArgLength)) return null;
   if (argRules && !isAllowedByRules(argRules, cmd, args)) return null;
 
   return { execPath, args };
@@ -148,9 +151,17 @@ const resolveExecutionFromRegistry = (parsed, registry, maxArgLength, argRules) 
  */
 const isAllowedByRules = (rules, command, args) => {
   const patterns = Object.hasOwn(rules, command) ? rules[command] : undefined;
-  if (!patterns) return false;
+  if (!Array.isArray(patterns)) return false;
   const joined = args.join(" ");
-  return patterns.some((pattern) => pattern.test(joined));
+  return patterns.some((pattern) => {
+    if (!(pattern instanceof RegExp)) return false;
+    // Reset lastIndex so a global or sticky pattern (reachable only
+    // through programmatic use; the rules file compiles flagless
+    // patterns) gives the same verdict for the same arguments on every
+    // request instead of alternating through RegExp#test state.
+    pattern.lastIndex = 0;
+    return pattern.test(joined);
+  });
 };
 
 export default class AccessLogTailDispatcher {
@@ -276,7 +287,13 @@ export default class AccessLogTailDispatcher {
     }
     this.activeCount += 1;
     this.lastExecAt = now;
+    // Node emits both "exit" and "close" for one process; the slot is
+    // freed by whichever arrives first, exactly once. Counting both
+    // would free a slot a later process is already using.
+    let settled = false;
     const decrementActive = () => {
+      if (settled) return;
+      settled = true;
       this.activeCount = Math.max(0, this.activeCount - 1);
     };
 
